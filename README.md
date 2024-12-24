@@ -1,0 +1,2 @@
+# jsin
+JSon Schema INferer

@@ -4,7 +4,7 @@ import hashlib
 
 import httpx
 
-from jsin.pydanticalize import pydanticalize
+from jsin import pydanticalize
 
 RESOURCE_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=snp&id=268,328,1001654958,1002404220,1003400802,1003610832,1003640385,1004901898,1005362844,1005381126,1005605852,1005647635,1005659710,1005987312,1006868105,1007107036,1007451921,1007980333,1008636307,1009450092,1009914415,1010449023&rettype=json&retmode=text'
 TEMP_DIR = os.path.expanduser('~/.temp/jsin')

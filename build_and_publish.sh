@@ -2,7 +2,10 @@
 
 set -euxo pipefail
 
-rm -rd dist/
+if [ -d dist ]
+then
+    rm -rd dist/
+fi
 
 python -m build
 

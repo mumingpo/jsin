@@ -1,13 +1,20 @@
 '''
-define the nodes used in schematic tree representations
+define the nodes used in the schematic tree representation
 '''
 
 from abc import ABC
 from abc import abstractmethod
-from enum import StrEnum
+
+import itertools
+
 from collections import Counter
+from collections import defaultdict
+
 from collections.abc import MutableMapping
 from collections.abc import Iterator
+from collections.abc import Iterable
+
+from dataclasses import dataclass
 
 from types import NoneType
 
@@ -16,78 +23,95 @@ from typing import Any
 from typing import TypedDict
 from typing import NotRequired
 
+from typing_extensions import override
 
-class SchematicTreeNodeType(StrEnum):
+from .exceptions import NodeInhomogeneityError
+from .exceptions import InsufficientOverlapError
+
+
+def rollup(nodes: Iterable['BaseNode']) -> 'BaseNode':
     '''
-    enum class describing types used by the parsed schema
+    combine an iterable of similar nodes into a single node
     '''
-    # placeholder for the value type of empty arrays
-    ANY = 'ANY'
-    # placeholder for the value type of null fields
-    NULL = 'NULL'
-    # true/false
-    BOOLEAN = 'BOOLEAN'
-    # int/float
-    NUMBER = 'NUMBER'
-    STRING = 'STRING'
-    # objects that are "data classes"
-    # that is, field_names paired with values frequently made up of different t ypes
-    # NOTE: object with values of the same type, indexed by their keys,
-    # are considered KEY_INDEXED_ARRAYs
-    OBJECT = 'OBJECT'
-    # array containing values of the same type.
-    ARRAY = 'ARRAY'
-    # objects containing values of the same type.
-    KEY_INDEXED_ARRAY = 'KEY_INDEXED_ARRAY'
+
+    l = list(nodes)
+
+    contains_null = any(
+        isinstance(node, NullNode) for node in l
+    )
+    meaningful = [
+        node for node in l
+        if not isinstance(node, (AnyNode, NullNode))
+    ]
+
+    types = {type(node) for node in meaningful}
+
+    if len(types) == 0:
+        if contains_null:
+            return NullNode()
+
+        return AnyNode()
+
+    if len(types) >= 2:
+        if types != {ObjectNode, KeyIndexedArrayNode}:
+            raise NodeInhomogeneityError(l)
+
+        new_nodes = [
+            node.convert_to_object_node()
+            if isinstance(node, KeyIndexedArrayNode)
+            else node
+            for node in meaningful
+        ]
+
+        return rollup(new_nodes)
+
+    # valid iff types contain a single type
+    (t, ) = types
+
+    return t.rollup(meaningful)
 
 
 class BaseNode(ABC):
     '''
     the base class for schematic tree nodes
     '''
-    t: SchematicTreeNodeType
 
-    def __init__(self, t: SchematicTreeNodeType):
-        self.t = t
+    def iter_nodes_postorder(self, name: str) -> Iterator[tuple[str, 'BaseNode']]:
+        '''
+        iterate (name, node) in the post-order
+        '''
 
-    def iter_nodes_postorder(self, name: str) -> Iterator[tuple[Self, str]]:
-        '''
-        iterate nodes and name from the root up
-        '''
-        yield self, name
-
-    @abstractmethod
-    def __add__(self, other) -> Self:
-        '''
-        combine two nodes
-        '''
-        return NotImplemented
+        yield (name, self)
 
     @abstractmethod
     def __str__(self):
-        return '<BaseNode>'
+        return 'Base'
+
+    @abstractmethod
+    def __repr__(self):
+        return 'BaseNode()'
 
     @abstractmethod
     def to_python_type(self) -> type:
         '''
         get the corresponding Python type for the node
         '''
-        return type(object)
 
-    # @classmethod
-    # @abstractmethod
-    # def rollup(cls, nodes: Iterable[Self]) -> Self:
-    #     '''
-    #     combine an iterable of similar nodes into a single node
-    #     '''
-    #     return NotImplemented
+        return type
+
+    @classmethod
+    @abstractmethod
+    def rollup(cls, nodes: Iterable[Self]) -> Self:
+        '''
+        combine an iterable of similar nodes into a single node
+        '''
+        return cls()
 
 
 class SingletonNode(BaseNode):
     '''
     singleton node for nodes that do not need multiple instances
     '''
-
     _instance: Self | None = None
 
     def __new__(cls):
@@ -96,15 +120,12 @@ class SingletonNode(BaseNode):
 
         return cls._instance
 
-    def __add__(self, other):
-        if other is self:
-            return self
+    def __repr__(self):
+        return f'{str(self)}Node()'
 
-        return NotImplemented
-
-    # @classmethod
-    # def rollup(cls, _):
-    #     return cls._instance
+    @classmethod
+    def rollup(cls, _):
+        return cls._instance
 
 
 class AnyNode(SingletonNode):
@@ -112,17 +133,8 @@ class AnyNode(SingletonNode):
     node used as a placeholder for empty arrays
     '''
 
-    def __init__(self):
-        super().__init__(SchematicTreeNodeType.ANY)
-
-    def __add__(self, other):
-        return other
-
-    def __radd__(self, other):
-        return other
-
     def __str__(self):
-        return '<AnyNode>'
+        return 'Any'
 
     def to_python_type(self):
         return Any
@@ -130,26 +142,11 @@ class AnyNode(SingletonNode):
 
 class NullNode(SingletonNode):
     '''
-    node used as a placeholder for null values
+    node used as a placeholder for { [key]: null } fields in JSON objects
     '''
 
-    def __init__(self):
-        super().__init__(SchematicTreeNodeType.NULL)
-
-    def __add__(self, other):
-        if isinstance(other, AnyNode):
-            return self
-
-        return other
-
-    def __radd__(self, other):
-        if isinstance(other, AnyNode):
-            return self
-
-        return other
-
     def __str__(self):
-        return '<NullNode>'
+        return 'Null'
 
     def to_python_type(self):
         return NoneType
@@ -160,11 +157,8 @@ class BooleanNode(SingletonNode):
     node used for boolean values
     '''
 
-    def __init__(self):
-        super().__init__(SchematicTreeNodeType.BOOLEAN)
-
     def __str__(self):
-        return '<BooleanNode>'
+        return 'Boolean'
 
     def to_python_type(self):
         return bool
@@ -177,37 +171,30 @@ class NumberNode(BaseNode):
 
     contains_float: bool
 
-    def __init__(self):
-        super().__init__(SchematicTreeNodeType.NUMBER)
-        self.contains_float = False
-
-    def __add__(self, other):
-        cls = type(self)
-        if isinstance(other, cls):
-            new_node = cls()
-            new_node.contains_float = (
-                self.contains_float or other.contains_float
-            )
-
-            return new_node
-
-        return NotImplemented
+    def __init__(self, contains_float=False):
+        self.contains_float = contains_float
 
     def __str__(self):
-        return f'<NumberNode float={self.contains_float}>'
+        return 'Number'
+
+    def __repr__(self):
+        return f'NumberNode(contains_float={self.contains_float})'
 
     def to_python_type(self):
         if self.contains_float:
             return float
 
-        return int
+        return str
 
-    # @classmethod
-    # def rollup(cls, nodes: Iterable[Self]) -> Self:
-    #     new_node = cls()
-    #     new_node.contains_float = any(node.contains_float for node in nodes)
+    @classmethod
+    def rollup(cls, nodes: Iterable[Self]) -> Self:
+        new_node = cls(
+            contains_float=any(
+                node.contains_float for node in nodes
+            ),
+        )
 
-    #     return new_node
+        return new_node
 
 
 class StringNode(BaseNode):
@@ -217,39 +204,33 @@ class StringNode(BaseNode):
 
     counter: Counter[str]
 
-    def __init__(self):
-        super().__init__(SchematicTreeNodeType.STRING)
+    def __init__(self, initial_string: str | None = None):
         self.counter = Counter()
 
-    def __add__(self, other):
-        cls = type(self)
-        if isinstance(other, cls):
-            new_node = cls()
-            new_node.counter = self.counter + other.counter
-
-            return new_node
-
-        return NotImplemented
+        if initial_string is not None:
+            self.counter[initial_string] += 1
 
     def __str__(self):
-        return '<StringNode>'
+        return 'String'
 
-    def to_python_type(self):
+    def __repr__(self):
+        return 'StringNode()'
+
+    def to_python_type(self) -> type:
         return str
 
-    # @classmethod
-    # def rollup(cls, nodes: Iterable[Self]) -> Self:
-    #     new_node = cls()
-    #     new_node.counter = sum(
-    #         (node.counter for node in nodes),
-    #         start=new_node.counter,
-    #     )
+    @classmethod
+    def rollup(cls, nodes: Iterable[Self]) -> Self:
+        new_node = cls()
 
-    #     return new_node
+        for node in nodes:
+            new_node.counter += node.counter
 
-    def infer_whether_is_enum(self) -> bool:
+        return new_node
+
+    def infer_whether_is_enum(self):
         '''
-        guess whether if string node represents an enum field
+        guess whether if string node represent an enum field
         '''
 
         # if number of choices is way less than the number of entries
@@ -257,156 +238,179 @@ class StringNode(BaseNode):
         return len(self.counter) ** 2 < self.counter.total()
 
 
-class ObjectNode(BaseNode, MutableMapping[str, tuple[BaseNode, bool, bool]]):
+@dataclass
+class ObjectNodeField():
     '''
-    node used for objects that are "data classes".
-    that is, { field_name: value, ... } dicts where
-    values are typically of different types.
-
-    { key: value, ... } where values are of a uniform type
-    where key is typically an attribute of value
-    is considered a KEY_INDEXED_OBJECT
+    dataclass represent a field of an object node
     '''
 
-    # { field_name: (node, optional, nullable) }
-    fields: dict[str, tuple[BaseNode, bool, bool]]
+    node: BaseNode
+    nullable: bool = False
+    optional: bool = False
 
-    def __init__(self):
-        super().__init__(SchematicTreeNodeType.OBJECT)
-        self.fields = dict()
+    @classmethod
+    def missing_default(cls):
+        '''
+        the default value for accessing missing fields
+        '''
+        return cls(
+            node=AnyNode(),
+            optional=True,
+        )
 
-    def iter_nodes_postorder(self, name: str) -> Iterator[tuple[Self, str]]:
-        for key, (node, _, _) in self.items():
-            yield from node.iter_nodes_postorder(key)
+    def __str__(self):
+        return str(self.node)
 
-        yield self, name
+    def __repr__(self):
+        return f'Field(node={repr(self.node)}, nullable={self.nullable}, optional={self.optional})'
 
-    def __getitem__(self, key):
+
+class ObjectNode(BaseNode, MutableMapping[str, ObjectNodeField]):
+    '''
+    node used for objects that are "dataclasses"
+    i.e. { field_name: value } dicts where values
+    hold different types and meanings depending
+    on the name of the field.
+
+    { key: value } dicts where values are of a uniform type
+    indexed by key is considered a KeyIndexedArray
+    '''
+
+    fields: dict[str, ObjectNodeField]
+
+    def __init__(self, fields: dict[str, ObjectNodeField] | None = None):
+        if fields is None:
+            self.fields = defaultdict(ObjectNodeField.missing_default)
+        else:
+            self.fields = fields
+
+    def __str__(self):
+        s = ', '.join(
+            f'{key}: {value}' for key, value in self.items()
+        )
+
+        return ''.join((
+            'Object({',
+            s,
+            '})',
+        ))
+
+    def __repr__(self):
+        s = ', '.join(
+            f'"{key}": {repr(value)}' for key, value in self.items()
+        )
+        return ''.join((
+            'ObjectNode({',
+            s,
+            '})',
+        ))
+
+    def to_python_type(self) -> type:
+        fields = dict()
+
+        for key, value in sorted(self.items()):
+            t = value.node.to_python_type()
+
+            # NoneType | NoneType = NoneType
+            # no redundancy would result.
+            if value.nullable:
+                t = t | NoneType
+
+            if value.optional:
+                t = NotRequired[t]
+
+            fields[key] = t
+
+        return TypedDict('Model', fields)
+
+    @classmethod
+    def rollup(cls, nodes: Iterable[Self]) -> Self:
+        fields = defaultdict(ObjectNodeField.missing_default)
+
+        keys = set().union(itertools.chain(
+            *(node.keys() for node in nodes)
+        ))
+
+        for key in keys:
+            value_node = rollup(node[key].node for node in nodes)
+            nullable = any(node[key].nullable for node in nodes)
+            optional = any(node[key].optional for node in nodes)
+
+            fields[key] = ObjectNodeField(
+                node=value_node,
+                nullable=nullable,
+                optional=optional,
+            )
+
+        if all(field.optional for field in fields.values()):
+            raise InsufficientOverlapError(
+                [field.node for field in fields.values()],
+            )
+
+        return cls(fields)
+
+    def __getitem__(self, key: str) -> ObjectNodeField:
         return self.fields[key]
 
-    def __setitem__(self, key, value):
-        assert len(value) == 3
-        assert isinstance(value[0], BaseNode)
-        assert isinstance(value[1], bool)
-        assert isinstance(value[2], bool)
+    def __setitem__(self, key: str, value: ObjectNodeField):
+        if isinstance(value.node, NullNode):
+            assert value.nullable is True
 
         self.fields[key] = value
 
-    def __delitem__(self, key):
+    def __delitem__(self, key: str):
         del self.fields[key]
 
     def __iter__(self):
-        return iter(self.fields)
+        yield from self.fields
 
     def __len__(self):
         return len(self.fields)
 
-    def __add__(self, other):
-        cls = type(self)
-        if isinstance(other, cls):
-            new_node = cls()
+    @override
+    def iter_nodes_postorder(self, name: str) -> Iterator[tuple[str, BaseNode]]:
+        for key, value in self.items():
+            yield from value.node.iter_nodes_postorder(key)
 
-            for key, value in self.items():
-                if key in other:
-                    node = value[0] + other[key][0]
-                    optional = value[1] or other[key][1]
-                    nullable = value[2] or other[key][2]
-                else:
-                    node = value[0]
-                    optional = True
-                    nullable = value[2]
-
-                new_node[key] = (node, optional, nullable)
-
-            for key in set(other.keys()).difference(self.keys()):
-                node = other[key][0]
-                optional = True
-                nullable = other[key][2]
-
-                new_node[key] = (node, optional, nullable)
-
-            return new_node
-
-        return NotImplemented
-
-    def __str__(self):
-        fields_string = ', '.join(
-            f'{key}: {str(value[0])}' for key, value in sorted(self.fields.items())
-        )
-        return f'<ObjectNode fields={fields_string}>'
-
-    def to_python_type(self):
-        fields = dict()
-        for key, (node, optional, nullable) in sorted(self.items()):
-            if optional or nullable:
-                fields[key] = NotRequired[node.to_python_type()]
-            else:
-                fields[key] = node.to_python_type()
-
-        # CamelCase is the proper casing for a type
-        # pylint: disable-next=C0103
-        Model = TypedDict('Model', fields)
-
-        return Model
-
-    # @classmethod
-    # def rollup(cls, nodes: Iterable[Self]) -> Self:
-    #     return sum(nodes, start=AnyNode())
+        yield (name, self)
 
 
 class ArrayNode(BaseNode):
     '''
-    node used to represent arrays
+    node used to represent arrays of values of
+    the same underlying schema
     '''
-
     value_node: BaseNode
 
-    def __init__(self):
-        super().__init__(SchematicTreeNodeType.ARRAY)
-        self.value_node = AnyNode()
-
-    def iter_nodes_postorder(self, name: str) -> Iterator[tuple[Self, str]]:
-        yield from self.value_node.iter_nodes_postorder(name.removesuffix('s'))
-        yield self, name
-
-    def __add__(self, other):
-        cls = type(self)
-        if isinstance(other, cls):
-            new_node = cls()
-            new_node.value_node = self.value_node + other.value_node
-
-            return new_node
-
-        return NotImplemented
+    def __init__(self, value_node: BaseNode | None = None):
+        if value_node is None:
+            self.value_node = AnyNode()
+        else:
+            self.value_node = value_node
 
     def __str__(self):
-        return f'<ArrayNode value_node={str(self.value_node)}>'
+        return f'[{self.value_node}, ...]'
 
-    def to_python_type(self):
+    def __repr__(self):
+        return f'ArrayNode(value_node={repr(self.value_node)})'
+
+    def to_python_type(self) -> type:
         return list[self.value_node.to_python_type()]
 
-    # @classmethod
-    # def rollup(cls, nodes: Iterable[Self]) -> Self:
-    #     meaningful = [
-    #         node for node in nodes
-    #         if not isinstance(node.value_node, AnyNode)
-    #     ]
-    #     node_types = {type(node.value_node) for node in meaningful}
+    @classmethod
+    def rollup(cls, nodes: Iterable[Self]) -> Self:
+        new_node = cls(
+            value_node=rollup(
+                node.value_node for node in nodes
+            ),
+        )
 
-    #     new_node = cls()
+        return new_node
 
-    #     if len(node_types) == 1:
-    #         (t, ) = node_types
-    #         new_node.value_node = t.rollup(
-    #             node.value_node for node in meaningful
-    #         )
-    #     else:
-    #         new_node.value_node = sum(
-    #             (node.value_node for node in meaningful),
-    #             start=AnyNode(),
-    #         )
-
-    #     return new_node
+    @override
+    def iter_nodes_postorder(self, name: str) -> Iterator[tuple[str, BaseNode]]:
+        yield from self.value_node.iter_nodes_postorder(name.removesuffix('s'))
+        yield (name, self)
 
 
 class KeyIndexedArrayNode(BaseNode):
@@ -414,83 +418,75 @@ class KeyIndexedArrayNode(BaseNode):
     node used to represent objects that are basically arrays,
     but that are indexed by keys of values
     '''
-
     keys: set[str]
     value_node: BaseNode
 
-    def __init__(self):
-        super().__init__(SchematicTreeNodeType.KEY_INDEXED_ARRAY)
-        self.keys = set()
-        self.value_node = AnyNode()
+    def __init__(self, value_node: BaseNode | None = None, keys: set[str] | None = None):
+        if value_node is None:
+            self.value_node = AnyNode()
+        else:
+            self.value_node = value_node
 
-    def iter_nodes_postorder(self, name: str) -> Iterator[tuple[Self, str]]:
-        yield from self.value_node.iter_nodes_postorder(name.removesuffix('s'))
-        yield self, name
-
-    def __add__(self, other):
-        cls = type(self)
-        if isinstance(other, cls):
-            new_node = cls()
-            new_node.keys = self.keys.union(other.keys)
-
-            try:
-                new_node.value_node = self.value_node + other.value_node
-
-                return new_node
-            except NotImplementedError():
-                # proceed to trying to add by converting to object node
-                pass
-
-        # fall back to trying with object node
-        return self.to_object_node() + other
+        if keys is None:
+            self.keys = set()
+        else:
+            self.keys = keys
 
     def __str__(self):
-        return f'<KeyIndexedArrayNode value_node={str(self.value_node)}>'
+        return f'{{[key]: {self.value_node}, ...}}'
 
-    def to_python_type(self):
+    def __repr__(self):
+        return f'KeyIndexedArrayNode(value_node={repr(self.value_node)}, keys={repr(self.keys)})'
+
+    def to_python_type(self) -> type:
         return dict[str, self.value_node.to_python_type()]
 
-    # @classmethod
-    # def rollup(cls, nodes: Iterable[Self]) -> Self:
-    #     meaningful = [
-    #         node for node in nodes
-    #         if not isinstance(node.value_node, AnyNode)
-    #     ]
-    #     node_types = {type(node.value_node) for node in meaningful}
+    @classmethod
+    def rollup(cls, nodes: Iterable[Self]) -> Self:
+        new_node = cls()
 
-    #     new_node = cls()
-    #     new_node.keys.update(node.keys for node in meaningful)
+        for node in nodes:
+            new_node.keys.update(node.keys)
 
-    #     try:
-    #         if len(node_types) == 1:
-    #             (t, ) = node_types
-    #             new_node.value_node = t.rollup(
-    #                 node.value_node for node in meaningful
-    #             )
-    #         else:
-    #             new_node.value_node = sum(
-    #                 (node.value_node for node in meaningful),
-    #                 start=AnyNode(),
-    #             )
-    #     except NotImplementedError as e:
-    #         try:
-    #             new_node = ObjectNode.rollup(
-    #                 node.to_object_node() for node in meaningful
-    #             )
-    #         except NotImplementedError:
-    #             raise e from None
+        new_node.value_node = rollup(
+            node.value_node for node in nodes
+        )
 
-    #     return new_node
+        return new_node
 
-    def to_object_node(self):
+    @override
+    def iter_nodes_postorder(self, name: str) -> Iterator[tuple[str, BaseNode]]:
+        yield from self.value_node.iter_nodes_postorder(name.removesuffix('s'))
+        yield (name, self)
+
+    def convert_to_object_node(self):
         '''
-        convert into an ObjectNode
+        convert a KeyIndexedArrayNode to an equivalent ObjectNode
         '''
-
-        nullable = isinstance(self.value_node, NullNode)
         new_node = ObjectNode()
 
         for key in self.keys:
-            new_node[key] = (self.value_node, False, nullable)
+            new_node[key] = ObjectNodeField(
+                node=self.value_node,
+                nullable=isinstance(self.value_node, NullNode),
+            )
 
         return new_node
+
+
+# class _Dummy(BaseNode):
+#     def __init__(self):
+#         pass
+
+#     def __str__(self):
+#         return ''
+
+#     def __repr__(self):
+#         return ''
+
+#     def to_python_type(self) -> type:
+#         return type
+
+#     @classmethod
+#     def rollup(cls, nodes: Iterable[Self]) -> Self:
+#         return cls()

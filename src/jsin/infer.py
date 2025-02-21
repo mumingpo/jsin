@@ -3,44 +3,18 @@ define the infer function to construct
 a schematic tree from a loaded json object
 '''
 
+# I don't know why pylint isn't updating its cache or whatever
+# pylint: disable=E1101, E1123
+
 from enum import StrEnum
 from typing import Self
 from collections.abc import Mapping
 from collections.abc import Collection
 
+
 from . import schematic_tree_nodes as stn
-from .jsin_error import JsinError
-
-
-class UnrecognizableTypeError(JsinError):
-    '''
-    failure to identify the JSON primitive type
-    as represented by a Python object
-    '''
-
-    def __init__(self, obj):
-        super().__init__(obj)
-
-    def __str__(self):
-        return '\n'.join(self._lines(
-            reason='unable to identify the JSON primitive type',
-            object=str(self.args[0]),
-        ))
-
-
-class IncompatibleNodesError(JsinError):
-    '''
-    failure to combine two schematic tree nodes into one
-    '''
-
-    def __init__(self, nodes: list[stn.BaseNode]):
-        super().__init__(nodes)
-
-    def __str__(self):
-        return '\n'.join(self._lines(
-            reason='attempting to combine incompatible schematic tree nodes',
-            nodes=str([str(node) for node in self.args[0]]),
-        ))
+from .exceptions import JsinError
+from .exceptions import UnidentifiableTypeError
 
 
 class JsonPrimitiveType(StrEnum):
@@ -61,32 +35,27 @@ class JsonPrimitiveType(StrEnum):
         identify the JSON primitive type of an object
         '''
 
-        t: Self | None = None
-
         if obj is None:
-            t = cls.NULL
+            return cls.NULL
 
-        elif isinstance(obj, bool):
+        if isinstance(obj, bool):
             if obj:
-                t = cls.TRUE
-            t = cls.FALSE
+                return cls.TRUE
+            return cls.FALSE
 
-        elif isinstance(obj, (int, float)):
-            t = cls.NUMBER
+        if isinstance(obj, (int, float)):
+            return cls.NUMBER
 
-        elif isinstance(obj, str):
-            t = cls.STRING
+        if isinstance(obj, str):
+            return cls.STRING
 
-        elif isinstance(obj, Mapping):
-            t = cls.OBJECT
+        if isinstance(obj, Mapping):
+            return cls.OBJECT
 
-        elif isinstance(obj, Collection):
-            t = cls.ARRAY
+        if isinstance(obj, Collection):
+            return cls.ARRAY
 
-        else:
-            raise UnrecognizableTypeError(obj)
-
-        return t
+        raise UnidentifiableTypeError(obj)
 
 
 def infer(obj) -> stn.BaseNode:
@@ -98,34 +67,25 @@ def infer(obj) -> stn.BaseNode:
 
     match t:
         case JsonPrimitiveType.NULL:
-            node = stn.NullNode()
+            return stn.NullNode()
 
         case JsonPrimitiveType.TRUE | JsonPrimitiveType.FALSE:
-            node = stn.BooleanNode()
+            return stn.BooleanNode()
 
         case JsonPrimitiveType.NUMBER:
-            node = stn.NumberNode()
-            node.contains_float = isinstance(obj, float)
+            return stn.NumberNode(contains_float=isinstance(obj, float))
 
         case JsonPrimitiveType.STRING:
-            node = stn.StringNode()
-            node.counter[obj] += 1
+            return stn.StringNode(initial_string=obj)
 
         case JsonPrimitiveType.ARRAY:
-            node = stn.ArrayNode()
-
             try:
-                children = [infer(elem) for elem in obj]
+                value_nodes = [infer(elem) for elem in obj]
+                value_node = stn.rollup(value_nodes)
             except JsinError as e:
                 raise e.under('ARRAY_ELEMENT') from e.__cause__
 
-            try:
-                node.value_node = sum(
-                    children,
-                    start=stn.AnyNode(),
-                )
-            except TypeError as e:
-                raise IncompatibleNodesError(children) from e
+            return stn.ArrayNode(value_node=value_node)
 
         case JsonPrimitiveType.OBJECT:
             object_node = stn.ObjectNode()
@@ -136,31 +96,25 @@ def infer(obj) -> stn.BaseNode:
                 except JsinError as e:
                     raise e.under(key) from e.__cause__
 
-                object_node[key] = (
-                    value_node,
-                    False,
-                    isinstance(value_node, stn.NullNode),
+                object_node[key] = stn.ObjectNodeField(
+                    node=value_node,
+                    nullable=isinstance(object_node, stn.NullNode),
                 )
 
             try:
-                key_indexed_array_node = stn.KeyIndexedArrayNode()
-                key_indexed_array_node.keys = set(object_node.keys())
+                # TODO: the optional and nullable attributes are currently ignored
+                # what are the implications?
+                value_node = stn.rollup(
+                    value.node for value in object_node.values()
+                )
 
-                children = (tup[0] for tup in object_node.values())
-                try:
+                return stn.KeyIndexedArrayNode(
+                    value_node=value_node,
+                    keys=set(object_node.keys()),
+                )
 
-                    key_indexed_array_node.value_node = sum(
-                        children,
-                        start=stn.AnyNode(),
-                    )
-                except TypeError as e:
-                    raise IncompatibleNodesError(children) from e
-
-                node = key_indexed_array_node
-            except JsinError:
-                node = object_node
+            except JsinError as e:
+                return object_node
 
         case _:
-            raise UnrecognizableTypeError(obj)
-
-    return node
+            raise RuntimeError('Should be unreachable.')

@@ -172,3 +172,5 @@ cython_debug/
 
 # old code for reference
 .old/
+# temp testing files
+.temp/

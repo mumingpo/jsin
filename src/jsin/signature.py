@@ -9,14 +9,16 @@ from dataclasses import dataclass
 
 from types import UnionType
 from types import NoneType
-from typing import NotRequired
 from typing import Any
+from typing import NotRequired
+from typing import Literal
 
 from functools import cache
 
 _EMPTY_FROZEN_SET = frozenset()
 
 _DEP_ANY = ('typing', 'Any')
+_DEP_LITERAL = ('typing', 'Literal')
 _DEP_OPTIONAL = ('typing', 'Optional')
 _DEP_BASE_CLASS = ('pydantic', 'BaseModel')
 
@@ -58,6 +60,7 @@ def signature(t: type) -> Signature:
     - dict[str, <type>]
     - TypedDict: ...
     - <type> | <type>
+    - Literal[value, ...]
     - NotRequired[type]
     '''
 
@@ -76,6 +79,20 @@ def signature(t: type) -> Signature:
         )
 
     if hasattr(t, '__origin__') and hasattr(t, '__args__'):
+        if t.__origin__ is Literal:
+
+            for arg in t.__args__:
+                if not isinstance(arg, str):
+                    raise NotImplementedError(
+                        'literals of non-string types are not currently supported',
+                    )
+
+            return Signature(
+                _s=f"Literal{sorted(t.__args__)}",
+                default_none=False,
+                dependencies=frozenset((_DEP_LITERAL,)),
+            )
+
         if t.__origin__ is NotRequired:
             (arg, ) = t.__args__
             arg_sig = signature(arg)

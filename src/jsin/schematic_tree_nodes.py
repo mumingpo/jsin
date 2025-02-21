@@ -17,8 +17,9 @@ from dataclasses import dataclass
 
 from types import NoneType
 
-from typing import Self
 from typing import Any
+from typing import Self
+from typing import Literal
 from typing import TypedDict
 from typing import NotRequired
 
@@ -215,7 +216,23 @@ class StringNode(BaseNode):
     def __repr__(self):
         return 'StringNode()'
 
+    def infer_whether_is_enum(self):
+        '''
+        guess whether if string node represent an enum field
+        '''
+
+        return all([
+            # if number of choices is way less than the number of entries
+            # we think there is an enum behind the scenes
+            len(self.counter) ** 2 < self.counter.total(),
+            # enum values shouldn't be too complicated,
+            # so long strings are a no-no
+            all(len(key) < 30 for key in self.counter),
+        ])
+
     def to_python_type(self) -> type:
+        if self.infer_whether_is_enum():
+            return Literal[*self.counter.keys()]
         return str
 
     @classmethod
@@ -226,15 +243,6 @@ class StringNode(BaseNode):
             new_node.counter += node.counter
 
         return new_node
-
-    def infer_whether_is_enum(self):
-        '''
-        guess whether if string node represent an enum field
-        '''
-
-        # if number of choices is way less than the number of entries
-        # we think there is an enum behind the scenes
-        return len(self.counter) ** 2 < self.counter.total()
 
 
 @dataclass

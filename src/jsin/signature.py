@@ -128,7 +128,7 @@ def signature(t: type) -> Signature:
                 ),
             )
 
-    if issubclass(t, UnionType):
+    if isinstance(t, UnionType):
         arg_sigs = sorted(
             (signature(arg) for arg in t.__args__),
             key=str,

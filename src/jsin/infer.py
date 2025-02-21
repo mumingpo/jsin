@@ -95,7 +95,7 @@ def infer(obj) -> stn.BaseNode:
 
                 object_node[key] = stn.ObjectNodeField(
                     node=value_node,
-                    nullable=isinstance(object_node, stn.NullNode),
+                    nullable=isinstance(value_node, stn.NullNode),
                 )
 
             try:

@@ -8,7 +8,6 @@ from abc import abstractmethod
 import itertools
 
 from collections import Counter
-from collections import defaultdict
 
 from collections.abc import MutableMapping
 from collections.abc import Iterator
@@ -280,7 +279,7 @@ class ObjectNode(BaseNode, MutableMapping[str, ObjectNodeField]):
 
     def __init__(self, fields: dict[str, ObjectNodeField] | None = None):
         if fields is None:
-            self.fields = defaultdict(ObjectNodeField.missing_default)
+            self.fields = dict()
         else:
             self.fields = fields
 
@@ -325,16 +324,30 @@ class ObjectNode(BaseNode, MutableMapping[str, ObjectNodeField]):
 
     @classmethod
     def rollup(cls, nodes: Iterable[Self]) -> Self:
-        fields = defaultdict(ObjectNodeField.missing_default)
+        fields: dict[str, ObjectNodeField] = dict()
 
         keys = set().union(itertools.chain(
             *(node.keys() for node in nodes)
         ))
 
         for key in keys:
-            value_node = rollup(node[key].node for node in nodes)
-            nullable = any(node[key].nullable for node in nodes)
-            optional = any(node[key].optional for node in nodes)
+            value_node = rollup(
+                node[key].node
+                for node in nodes
+                if key in node
+            )
+            nullable = any(
+                node[key].nullable
+                for node in nodes
+                if key in node
+            )
+            optionals = list(
+                node[key].optional
+                for node in nodes
+                if key in node
+            )
+
+            optional = any(optionals) or len(optionals) < len(nodes)
 
             fields[key] = ObjectNodeField(
                 node=value_node,

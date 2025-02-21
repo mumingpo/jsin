@@ -3,9 +3,6 @@ define the infer function to construct
 a schematic tree from a loaded json object
 '''
 
-# I don't know why pylint isn't updating its cache or whatever
-# pylint: disable=E1101, E1123
-
 from enum import StrEnum
 from typing import Self
 from collections.abc import Mapping

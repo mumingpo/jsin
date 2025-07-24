@@ -91,6 +91,9 @@ class BaseNode(ABC):
     def __repr__(self):
         return 'BaseNode()'
 
+    def __hash__(self):
+        return hash(repr(self))
+
     @abstractmethod
     def to_python_type(self) -> type:
         '''
@@ -184,7 +187,7 @@ class NumberNode(BaseNode):
         if self.contains_float:
             return float
 
-        return str
+        return int
 
     @classmethod
     def rollup(cls, nodes: Iterable[Self]) -> Self:
